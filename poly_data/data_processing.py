@@ -23,9 +23,17 @@ def process_book_data(asset, json_data):
 
 def process_price_change(asset, asset_id, side, price_level, new_size):
     with global_state.lock:
+        # Defensive checks: ensure asset exists and is initialized
+        if asset not in global_state.all_data:
+            return
+
+        if 'asset_id' not in global_state.all_data[asset]:
+            return
+
         # Skip updates for the No token to prevent duplicated updates
         if asset_id != global_state.all_data[asset]['asset_id']:
             return
+
         if side == 'bids':
             book = global_state.all_data[asset]['bids']
         else:
@@ -64,9 +72,17 @@ def process_data(json_datas, trade=True):
 
         elif event_type == 'price_change':
             for data in json_data['price_changes']:
+                # Defensive checks for required fields
+                if 'side' not in data or 'price' not in data or 'size' not in data:
+                    continue
+
                 side = 'bids' if data['side'] == 'BUY' else 'asks'
-                price_level = float(data['price'])
-                new_size = float(data['size'])
+                try:
+                    price_level = float(data['price'])
+                    new_size = float(data['size'])
+                except (ValueError, TypeError):
+                    continue
+
                 asset_id = data.get('asset_id')
                 if asset_id is not None:
                     process_price_change(asset, asset_id, side, price_level, new_size)
@@ -115,24 +131,32 @@ def process_user_data(rows):
                 taker_outcome = row['outcome']
 
                 is_user_maker = False
-                for maker_order in row['maker_orders']:
-                    if maker_order['maker_address'].lower() == global_state.client.browser_wallet.lower():
-                        print("User is maker")
-                        size = float(maker_order['matched_amount'])
-                        price = float(maker_order['price'])
-                        
-                        is_user_maker = True
-                        maker_outcome = maker_order['outcome'] #this is curious
+                try:
+                    for maker_order in row['maker_orders']:
+                        if maker_order['maker_address'].lower() == global_state.client.browser_wallet.lower():
+                            print("User is maker")
+                            size = float(maker_order['matched_amount'])
+                            price = float(maker_order['price'])
 
-                        if maker_outcome == taker_outcome:
-                            side = 'buy' if side == 'sell' else 'sell' #need to reverse as we reverse token too
-                        else:
-                            token = global_state.REVERSE_TOKENS[token]
-                
+                            is_user_maker = True
+                            maker_outcome = maker_order['outcome'] #this is curious
+
+                            if maker_outcome == taker_outcome:
+                                side = 'buy' if side == 'sell' else 'sell' #need to reverse as we reverse token too
+                            else:
+                                token = global_state.REVERSE_TOKENS[token]
+                except (KeyError, ValueError, TypeError) as e:
+                    print(f"Error processing maker orders: {e}")
+                    continue
+
                 if not is_user_maker:
-                    size = float(row['size'])
-                    price = float(row['price'])
-                    print("User is taker")
+                    try:
+                        size = float(row['size'])
+                        price = float(row['price'])
+                        print("User is taker")
+                    except (KeyError, ValueError, TypeError) as e:
+                        print(f"Error processing taker data: {e}")
+                        continue
 
                 print("TRADE EVENT FOR: ", row['market'], "ID: ", row['id'], "STATUS: ", row['status'], " SIDE: ", row['side'], "  MAKER OUTCOME: ", maker_outcome, " TAKER OUTCOME: ", taker_outcome, " PROCESSED SIDE: ", side, " SIZE: ", size) 
 

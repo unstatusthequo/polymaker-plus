@@ -26,19 +26,31 @@ import poly_data.global_state as global_state
 #     return api_avgPrice
 
 def get_best_bid_ask_deets(market, name, size, deviation_threshold=0.05):
+    # Acquire lock before accessing shared order book data to prevent race conditions
+    with global_state.lock:
+        # Check if market exists in all_data
+        if market not in global_state.all_data:
+            # Return default values if market doesn't exist
+            return {
+                'best_bid': None, 'best_bid_size': None, 'second_best_bid': None,
+                'second_best_bid_size': None, 'top_bid': None, 'best_ask': None,
+                'best_ask_size': None, 'second_best_ask': None,
+                'second_best_ask_size': None, 'top_ask': None,
+                'bid_sum_within_n_percent': 0, 'ask_sum_within_n_percent': 0
+            }
 
-    best_bid, best_bid_size, second_best_bid, second_best_bid_size, top_bid = find_best_price_with_size(global_state.all_data[market]['bids'], size, reverse=True)
-    best_ask, best_ask_size, second_best_ask, second_best_ask_size, top_ask = find_best_price_with_size(global_state.all_data[market]['asks'], size, reverse=False)
-    
-    # Handle None values in mid_price calculation
-    if best_bid is not None and best_ask is not None:
-        mid_price = (best_bid + best_ask) / 2
-        bid_sum_within_n_percent = sum(size for price, size in global_state.all_data[market]['bids'].items() if best_bid <= price <= mid_price * (1 + deviation_threshold))
-        ask_sum_within_n_percent = sum(size for price, size in global_state.all_data[market]['asks'].items() if mid_price * (1 - deviation_threshold) <= price <= best_ask)
-    else:
-        mid_price = None
-        bid_sum_within_n_percent = 0
-        ask_sum_within_n_percent = 0
+        best_bid, best_bid_size, second_best_bid, second_best_bid_size, top_bid = find_best_price_with_size(global_state.all_data[market]['bids'], size, reverse=True)
+        best_ask, best_ask_size, second_best_ask, second_best_ask_size, top_ask = find_best_price_with_size(global_state.all_data[market]['asks'], size, reverse=False)
+
+        # Handle None values in mid_price calculation
+        if best_bid is not None and best_ask is not None:
+            mid_price = (best_bid + best_ask) / 2
+            bid_sum_within_n_percent = sum(size for price, size in global_state.all_data[market]['bids'].items() if best_bid <= price <= mid_price * (1 + deviation_threshold))
+            ask_sum_within_n_percent = sum(size for price, size in global_state.all_data[market]['asks'].items() if mid_price * (1 - deviation_threshold) <= price <= best_ask)
+        else:
+            mid_price = None
+            bid_sum_within_n_percent = 0
+            ask_sum_within_n_percent = 0
 
     if name == 'token2':
         # Handle None values before arithmetic operations
@@ -113,10 +125,10 @@ def get_order_prices(best_bid, best_bid_size, top_bid,  best_ask, best_ask_size,
 
     if best_bid_size < row['min_size'] * 1.5:
         bid_price = best_bid
-    
+
     if best_ask_size < 250 * 1.5:
         ask_price = best_ask
-    
+
 
     if bid_price >= top_ask:
         bid_price = top_bid
@@ -135,6 +147,10 @@ def get_order_prices(best_bid, best_bid_size, top_bid,  best_ask, best_ask_size,
     #temp for sleep
     if ask_price <= avgPrice and avgPrice > 0:
         ask_price = avgPrice
+
+    # Ensure prices stay within valid bounds for prediction markets (0.01 to 0.99)
+    bid_price = max(0.01, min(0.99, bid_price))
+    ask_price = max(0.01, min(0.99, ask_price))
 
     return bid_price, ask_price
 

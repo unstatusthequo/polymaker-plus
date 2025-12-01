@@ -16,7 +16,8 @@ def get_sel_df(spreadsheet, sheet_name='Selected Markets'):
         sel_df = pd.DataFrame(wk2.get_all_records())
         sel_df = sel_df[sel_df['question'] != ""].reset_index(drop=True)
         return sel_df
-    except:
+    except Exception as e:
+        print(f"Error getting selected markets from sheet: {e}")
         return pd.DataFrame()
     
 def get_all_markets(client):
@@ -26,18 +27,23 @@ def get_all_markets(client):
     while True:
         try:
             markets = client.get_sampling_markets(next_cursor = cursor)
+            if not markets or 'data' not in markets:
+                print("Invalid response from get_sampling_markets, breaking")
+                break
+
             markets_df = pd.DataFrame(markets['data'])
+            if len(markets_df) == 0:
+                print("Empty markets data, breaking")
+                break
 
-
-            cursor = markets['next_cursor']
-            
-
+            cursor = markets.get('next_cursor')
 
             all_markets.append(markets_df)
 
             if cursor is None:
                 break
-        except:
+        except Exception as e:
+            print(f"Error fetching markets: {e}")
             break
 
     all_df = pd.concat(all_markets)
@@ -140,23 +146,31 @@ def process_single_row(row, client):
 
     try:
         bids = pd.DataFrame(book.bids).astype(float)
-    except:
-        pass
+    except (ValueError, TypeError, AttributeError) as e:
+        print(f"Error parsing bids: {e}")
 
     try:
         asks = pd.DataFrame(book.asks).astype(float)
-    except:
-        pass
+    except (ValueError, TypeError, AttributeError) as e:
+        print(f"Error parsing asks: {e}")
 
 
     try:
-        ret['best_bid'] = bids.iloc[-1]['price']
-    except:
+        if len(bids) > 0 and 'price' in bids.columns:
+            ret['best_bid'] = bids.iloc[-1]['price']
+        else:
+            ret['best_bid'] = 0
+    except (IndexError, KeyError) as e:
+        print(f"Error getting best bid: {e}")
         ret['best_bid'] = 0
 
     try:
-        ret['best_ask'] = asks.iloc[-1]['price']
-    except:
+        if len(asks) > 0 and 'price' in asks.columns:
+            ret['best_ask'] = asks.iloc[-1]['price']
+        else:
+            ret['best_ask'] = 0
+    except (IndexError, KeyError) as e:
+        print(f"Error getting best ask: {e}")
         ret['best_ask'] = 0
 
     ret['midpoint'] = (ret['best_bid'] + ret['best_ask']) / 2
@@ -174,32 +188,42 @@ def process_single_row(row, client):
     asks_df['price'] = generate_numbers(ask_from, ask_to, TICK_SIZE)
 
     try:
-        bids_df = bids_df.merge(bids, on='price', how='left').fillna(0)
-    except:
+        if len(bids_df) > 0 and len(bids) > 0:
+            bids_df = bids_df.merge(bids, on='price', how='left').fillna(0)
+        else:
+            bids_df = pd.DataFrame()
+    except Exception as e:
+        print(f"Error merging bids: {e}")
         bids_df = pd.DataFrame()
 
     try:
-        asks_df = asks_df.merge(asks, on='price', how='left').fillna(0)
-    except:
+        if len(asks_df) > 0 and len(asks) > 0:
+            asks_df = asks_df.merge(asks, on='price', how='left').fillna(0)
+        else:
+            asks_df = pd.DataFrame()
+    except Exception as e:
+        print(f"Error merging asks: {e}")
         asks_df = pd.DataFrame()
 
     best_bid_reward = 0
     ret_bid = pd.DataFrame()
 
     try:
-        ret_bid = add_formula_params(bids_df, ret['midpoint'], v, rate)
-        best_bid_reward = round(ret_bid['reward_per_100'].max(), 2)
-    except:
-        pass
+        if len(bids_df) > 0:
+            ret_bid = add_formula_params(bids_df, ret['midpoint'], v, rate)
+            best_bid_reward = round(ret_bid['reward_per_100'].max(), 2)
+    except Exception as e:
+        print(f"Error calculating bid rewards: {e}")
 
     best_ask_reward = 0
     ret_ask = pd.DataFrame()
 
     try:
-        ret_ask = add_formula_params(asks_df, ret['midpoint'], v, rate)
-        best_ask_reward = round(ret_ask['reward_per_100'].max(), 2)
-    except:
-        pass
+        if len(asks_df) > 0:
+            ret_ask = add_formula_params(asks_df, ret['midpoint'], v, rate)
+            best_ask_reward = round(ret_ask['reward_per_100'].max(), 2)
+    except Exception as e:
+        print(f"Error calculating ask rewards: {e}")
 
     ret['bid_reward_per_100'] = best_bid_reward
     ret['ask_reward_per_100'] = best_ask_reward
@@ -223,8 +247,8 @@ def get_all_results(all_df, client, max_workers=5):
         idx, row = args
         try:
             return process_single_row(row, client)
-        except:
-            print("error fetching market")
+        except Exception as e:
+            print(f"Error fetching market: {e}")
             return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -264,13 +288,32 @@ def calculate_annualized_volatility(df, hours):
     return round(annualized_volatility, 2)
 
 def add_volatility(row):
-    res = requests.get(f'https://clob.polymarket.com/prices-history?interval=1m&market={row["token1"]}&fidelity=10')
-    price_df = pd.DataFrame(res.json()['history'])
+    # Add validation for external API response
+    res = requests.get(
+        f'https://clob.polymarket.com/prices-history?interval=1m&market={row["token1"]}&fidelity=10',
+        timeout=10
+    )
+    res.raise_for_status()
+
+    data = res.json()
+    if 'history' not in data:
+        raise ValueError("Missing 'history' key in API response")
+
+    history = data['history']
+    if not history or len(history) == 0:
+        raise ValueError("Empty history data in API response")
+
+    price_df = pd.DataFrame(history)
+
+    # Validate required columns
+    if 't' not in price_df.columns or 'p' not in price_df.columns:
+        raise ValueError("Missing required columns in price data")
+
     price_df['t'] = pd.to_datetime(price_df['t'], unit='s')
     price_df['p'] = price_df['p'].round(2)
 
     price_df.to_csv(f'data/{row["token1"]}.csv', index=False)
-    
+
     price_df['log_return'] = np.log(price_df['p'] / price_df['p'].shift(1))
 
     row_dict = row.copy()
@@ -300,8 +343,8 @@ def add_volatility_to_df(df, max_workers=2):
         try:
             ret = add_volatility(row.to_dict())
             return ret
-        except:
-            print("Error fetching volatility")
+        except Exception as e:
+            print(f"Error fetching volatility: {e}")
             return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
