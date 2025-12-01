@@ -45,10 +45,10 @@ def remove_from_pending():
                         print(f"Removing stale entry {trade_id} from {col} after 15 seconds")
                         remove_from_performing(col, trade_id)
                         print("After removing: ", global_state.performing, global_state.performing_timestamps)
-                except:
+                except Exception:
                     print("Error in remove_from_pending")
                     print(traceback.format_exc())
-    except:
+    except Exception:
         print("Error in remove_from_pending")
         print(traceback.format_exc())
 

@@ -2,7 +2,6 @@ import poly_data.global_state as global_state
 from poly_data.utils import get_sheet_df
 import time
 
-#sth here seems to be removing the position
 def update_positions(avgOnly=False):
     """Refresh cached positions from the client, optionally skipping size updates."""
     pos_df = global_state.client.get_all_positions()

@@ -178,4 +178,4 @@ def process_user_data(rows):
                 _schedule_trade(market)
 
         else:
-            print(f"User data received for {market} but its not in the configured token map")
+            print(f"User data received for {market} with token {token} but it is not in the configured token map")
