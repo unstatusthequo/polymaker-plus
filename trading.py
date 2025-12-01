@@ -124,32 +124,48 @@ def send_sell_order(order):
 
 # Dictionary to store locks for each market to prevent concurrent trading on the same market
 market_locks = {}
+# Lock to protect market_locks dictionary initialization
+market_locks_init_lock = asyncio.Lock()
 
 async def perform_trade(market):
     """
     Main trading function that handles market making for a specific market.
-    
+
     This function:
     1. Merges positions when possible to free up capital
     2. Analyzes the market to determine optimal bid/ask prices
     3. Manages buy and sell orders based on position size and market conditions
     4. Implements risk management with stop-loss and take-profit logic
-    
+
     Args:
         market (str): The market ID to trade on
     """
-    # Create a lock for this market if it doesn't exist
-    if market not in market_locks:
-        market_locks[market] = asyncio.Lock()
+    # Create a lock for this market if it doesn't exist - protected to prevent race conditions
+    async with market_locks_init_lock:
+        if market not in market_locks:
+            market_locks[market] = asyncio.Lock()
 
     # Use lock to prevent concurrent trading on the same market
     async with market_locks[market]:
         try:
             client = global_state.client
             # Get market details from the configuration
-            row = global_state.df[global_state.df['condition_id'] == market].iloc[0]      
-            # Determine decimal precision from tick size
-            round_length = len(str(row['tick_size']).split(".")[1])
+            market_df = global_state.df[global_state.df['condition_id'] == market]
+            if len(market_df) == 0:
+                print(f"Market {market} not found in configuration, skipping trade")
+                return
+            row = market_df.iloc[0]
+
+            # Determine decimal precision from tick size - handle various formats
+            try:
+                tick_str = str(row['tick_size'])
+                if '.' in tick_str:
+                    round_length = len(tick_str.split(".")[1])
+                else:
+                    round_length = 2  # Default to 2 decimal places
+            except (ValueError, AttributeError):
+                print(f"Invalid tick_size format: {row['tick_size']}, using default")
+                round_length = 2
 
             # Get trading parameters for this market type
             params = global_state.params[row['param_type']]
@@ -219,13 +235,13 @@ async def perform_trade(market):
                 # Calculate ratio of buy vs sell liquidity in the market
                 try:
                     overall_ratio = (deets['bid_sum_within_n_percent']) / (deets['ask_sum_within_n_percent'])
-                except:
+                except (ZeroDivisionError, TypeError):
                     overall_ratio = 0
 
                 try:
                     second_best_bid = round(second_best_bid, round_length)
                     second_best_ask = round(second_best_ask, round_length)
-                except:
+                except (TypeError, ValueError):
                     pass
                 
                 top_bid = round(top_bid, round_length)
@@ -313,7 +329,7 @@ async def perform_trade(market):
 
                     try:
                         ratio = (n_deets['bid_sum_within_n_percent']) / (n_deets['ask_sum_within_n_percent'])
-                    except:
+                    except (ZeroDivisionError, TypeError):
                         ratio = 0
 
                     pos_to_sell = sell_amount  # Amount to sell in risk-off scenario
@@ -339,8 +355,12 @@ async def perform_trade(market):
                         send_sell_order(order)
                         client.cancel_all_market(market)
 
-                        # Save risk details to file
-                        open(fname, 'w').write(json.dumps(risk_details))
+                        # Save risk details to file with proper resource management
+                        try:
+                            with open(fname, 'w') as f:
+                                json.dump(risk_details, f)
+                        except (IOError, OSError) as e:
+                            print(f"Error saving risk details to {fname}: {e}")
                         continue
 
                 # ------- BUY ORDER LOGIC -------
@@ -370,16 +390,20 @@ async def perform_trade(market):
                     # ------- RISK-OFF PERIOD CHECK -------
                     # If we're in a risk-off period (after stop-loss), don't buy
                     if os.path.isfile(fname):
-                        risk_details = json.load(open(fname))
+                        try:
+                            with open(fname, 'r') as f:
+                                risk_details = json.load(f)
 
-                        start_trading_at = pd.to_datetime(risk_details['sleep_till'])
-                        current_time = pd.Timestamp.utcnow().tz_localize(None)
+                            start_trading_at = pd.to_datetime(risk_details['sleep_till'])
+                            current_time = pd.Timestamp.utcnow().tz_localize(None)
 
-                        print(risk_details, current_time, start_trading_at)
-                        if current_time < start_trading_at:
-                            send_buy = False
-                            print(f"Not sending a buy order because recently risked off. "
-                                 f"Risked off at {risk_details['time']}")
+                            print(risk_details, current_time, start_trading_at)
+                            if current_time < start_trading_at:
+                                send_buy = False
+                                print(f"Not sending a buy order because recently risked off. "
+                                     f"Risked off at {risk_details['time']}")
+                        except (IOError, OSError, json.JSONDecodeError, KeyError) as e:
+                            print(f"Error reading risk details from {fname}: {e}, ignoring risk-off period")
 
                     # Only proceed if we're not in risk-off period
                     if send_buy:
@@ -466,6 +490,6 @@ async def perform_trade(market):
             print(f"Error performing trade for {market}: {ex}")
             traceback.print_exc()
 
-        # Clean up memory and introduce a small delay
-        gc.collect()
+        # Small delay before next trade cycle
+        # Note: gc.collect() removed here to reduce latency - it's called periodically in main.py
         await asyncio.sleep(2)

@@ -27,7 +27,7 @@ def update_positions(avgOnly=False):
                     if col not in global_state.performing or not isinstance(global_state.performing[col], set) or len(global_state.performing[col]) == 0:
                         try:
                             old_size = position['size']
-                        except:
+                        except (KeyError, TypeError):
                             old_size = 0
 
                         if asset in  global_state.last_trade_update:
@@ -46,10 +46,11 @@ def update_positions(avgOnly=False):
 
 def get_position(token):
     token = str(token)
-    if token in global_state.positions:
-        return global_state.positions[token]
-    else:
-        return {'size': 0, 'avgPrice': 0}
+    with global_state.lock:
+        if token in global_state.positions:
+            return global_state.positions[token].copy()
+        else:
+            return {'size': 0, 'avgPrice': 0}
 
 def set_position(token, side, size, price, source='websocket'):
     token = str(token)
@@ -124,17 +125,22 @@ def update_orders():
 
 def get_order(token):
     token = str(token)
-    if token in global_state.orders:
+    with global_state.lock:
+        if token in global_state.orders:
 
-        if 'buy' not in global_state.orders[token]:
-            global_state.orders[token]['buy'] = {'price': 0, 'size': 0}
+            if 'buy' not in global_state.orders[token]:
+                global_state.orders[token]['buy'] = {'price': 0, 'size': 0}
 
-        if 'sell' not in global_state.orders[token]:
-            global_state.orders[token]['sell'] = {'price': 0, 'size': 0}
+            if 'sell' not in global_state.orders[token]:
+                global_state.orders[token]['sell'] = {'price': 0, 'size': 0}
 
-        return global_state.orders[token]
-    else:
-        return {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+            # Return a deep copy to prevent external modification
+            return {
+                'buy': global_state.orders[token]['buy'].copy(),
+                'sell': global_state.orders[token]['sell'].copy()
+            }
+        else:
+            return {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
     
 def set_order(token, side, size, price):
     curr = {}

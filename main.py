@@ -28,28 +28,36 @@ def remove_from_pending():
     """
     try:
         current_time = time.time()
-            
+
         # Iterate through all performing trades
+        # Keep lock held throughout to prevent race conditions
         with global_state.lock:
             items = [(col, list(ids)) for col, ids in global_state.performing.items()]
 
-        for col, trade_ids in items:
-            for trade_id in trade_ids:
+            for col, trade_ids in items:
+                for trade_id in trade_ids:
+                    try:
+                        # If trade has been pending for more than 15 seconds, remove it
+                        if col not in global_state.performing_timestamps:
+                            continue
 
-                try:
-                    # If trade has been pending for more than 15 seconds, remove it
-                    with global_state.lock:
                         timestamp = global_state.performing_timestamps[col].get(trade_id, current_time)
 
-                    if current_time - timestamp > 15:
-                        print(f"Removing stale entry {trade_id} from {col} after 15 seconds")
-                        remove_from_performing(col, trade_id)
-                        print("After removing: ", global_state.performing, global_state.performing_timestamps)
-                except:
-                    print("Error in remove_from_pending")
-                    print(traceback.format_exc())
-    except:
-        print("Error in remove_from_pending")
+                        if current_time - timestamp > 15:
+                            print(f"Removing stale entry {trade_id} from {col} after 15 seconds")
+                            # Remove directly instead of calling remove_from_performing to avoid nested lock
+                            if col in global_state.performing:
+                                global_state.performing[col].discard(trade_id)
+
+                            if col in global_state.performing_timestamps:
+                                global_state.performing_timestamps[col].pop(trade_id, None)
+
+                            print("After removing: ", global_state.performing, global_state.performing_timestamps)
+                    except Exception as e:
+                        print(f"Error removing specific trade {trade_id}: {e}")
+                        print(traceback.format_exc())
+    except Exception as e:
+        print(f"Error in remove_from_pending: {e}")
         print(traceback.format_exc())
 
 def update_periodically():
@@ -58,15 +66,16 @@ def update_periodically():
     - Positions and orders are updated every 5 seconds
     - Market data is updated every 30 seconds (every 6 cycles)
     - Stale pending trades are removed each cycle
+    - Garbage collection runs every 60 seconds to reduce overhead
     """
     i = 1
     while True:
         time.sleep(5)  # Update every 5 seconds
-        
+
         try:
             # Clean up stale trades
             remove_from_pending()
-            
+
             # Update positions and orders every cycle
             update_positions(avgOnly=True)  # Only update average price, not position size
             update_orders()
@@ -74,12 +83,15 @@ def update_periodically():
             # Update market data every 6th cycle (30 seconds)
             if i % 6 == 0:
                 update_markets()
+
+            # Run garbage collection every 60 seconds (every 12th cycle) to reduce overhead
+            if i % 12 == 0:
+                gc.collect()
                 i = 1
-                    
-            gc.collect()  # Force garbage collection to free memory
+
             i += 1
-        except:
-            print("Error in update_periodically")
+        except Exception as e:
+            print(f"Error in update_periodically: {e}")
             print(traceback.format_exc())
             
 async def main():
@@ -110,12 +122,11 @@ async def main():
                 connect_user_websocket()
             )
             print("Reconnecting to the websocket")
-        except:
-            print("Error in main loop")
+        except Exception as e:
+            print(f"Error in main loop: {e}")
             print(traceback.format_exc())
-            
+
         await asyncio.sleep(1)
-        gc.collect()  # Clean up memory
 
 if __name__ == "__main__":
     asyncio.run(main())

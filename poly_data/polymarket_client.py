@@ -15,6 +15,7 @@ import requests                     # HTTP requests
 import pandas as pd                 # Data analysis
 import json                         # JSON processing
 import subprocess                   # For calling external processes
+import time                         # For retry delays
 
 from py_clob_client.clob_types import OpenOrderParams
 
@@ -164,12 +165,39 @@ class PolymarketClient:
     def get_pos_balance(self):
         """
         Get the total value of all positions for the connected wallet.
-        
+
         Returns:
             float: Total position value in USDC
         """
-        res = requests.get(f'https://data-api.polymarket.com/value?user={self.browser_wallet}')
-        return float(res.json()['value'])
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                res = requests.get(
+                    f'https://data-api.polymarket.com/value?user={self.browser_wallet}',
+                    timeout=10
+                )
+                res.raise_for_status()
+                data = res.json()
+                if 'value' not in data:
+                    raise KeyError("Missing 'value' key in API response")
+                return float(data['value'])
+            except requests.exceptions.Timeout:
+                print(f"Timeout getting position balance (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    print("Failed to get position balance after retries, returning 0")
+                    return 0.0
+            except requests.exceptions.RequestException as e:
+                print(f"Network error getting position balance (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    print("Failed to get position balance after retries, returning 0")
+                    return 0.0
+            except (KeyError, ValueError, TypeError) as e:
+                print(f"Error parsing position balance response: {e}")
+                return 0.0
 
     def get_total_balance(self):
         """
@@ -183,12 +211,37 @@ class PolymarketClient:
     def get_all_positions(self):
         """
         Get all positions for the connected wallet across all markets.
-        
+
         Returns:
             DataFrame: All positions with details like market, size, avgPrice
         """
-        res = requests.get(f'https://data-api.polymarket.com/positions?user={self.browser_wallet}')
-        return pd.DataFrame(res.json())
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                res = requests.get(
+                    f'https://data-api.polymarket.com/positions?user={self.browser_wallet}',
+                    timeout=10
+                )
+                res.raise_for_status()
+                data = res.json()
+                return pd.DataFrame(data)
+            except requests.exceptions.Timeout:
+                print(f"Timeout getting positions (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    print("Failed to get positions after retries, returning empty DataFrame")
+                    return pd.DataFrame()
+            except requests.exceptions.RequestException as e:
+                print(f"Network error getting positions (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    print("Failed to get positions after retries, returning empty DataFrame")
+                    return pd.DataFrame()
+            except (ValueError, TypeError) as e:
+                print(f"Error parsing positions response: {e}")
+                return pd.DataFrame()
     
     def get_raw_position(self, tokenId):
         """
@@ -284,36 +337,53 @@ class PolymarketClient:
     def merge_positions(self, amount_to_merge, condition_id, is_neg_risk_market):
         """
         Merge positions in a market to recover collateral.
-        
+
         This function calls the external poly_merger Node.js script to execute
         the merge operation on-chain. When you hold both YES and NO positions
         in the same market, merging them recovers your USDC.
-        
+
         Args:
             amount_to_merge (int): Raw token amount to merge (before decimal conversion)
             condition_id (str): Market condition ID
             is_neg_risk_market (bool): Whether this is a negative risk market
-            
+
         Returns:
             str: Transaction hash or output from the merge script
-            
+
         Raises:
             Exception: If the merge operation fails
         """
         amount_to_merge_str = str(amount_to_merge)
 
-        # Prepare the command to run the JavaScript script
-        node_command = f'node poly_merger/merge.js {amount_to_merge_str} {condition_id} {"true" if is_neg_risk_market else "false"}'
-        print(node_command)
+        # Use list-based command to prevent shell injection
+        # Pass arguments safely without shell=True
+        node_command = [
+            'node',
+            'poly_merger/merge.js',
+            amount_to_merge_str,
+            condition_id,
+            'true' if is_neg_risk_market else 'false'
+        ]
+        print(f"Running merge command: {' '.join(node_command)}")
 
-        # Run the command and capture the output
-        result = subprocess.run(node_command, shell=True, capture_output=True, text=True)
-        
+        # Run the command with timeout and proper security
+        try:
+            result = subprocess.run(
+                node_command,
+                shell=False,  # Security: don't use shell
+                capture_output=True,
+                text=True,
+                timeout=120  # 2 minute timeout for blockchain operations
+            )
+        except subprocess.TimeoutExpired:
+            print("Error: Merge operation timed out after 120 seconds")
+            raise Exception("Merge operation timed out")
+
         # Check if there was an error
         if result.returncode != 0:
             print("Error:", result.stderr)
             raise Exception(f"Error in merging positions: {result.stderr}")
-        
+
         print("Done merging")
 
         # Return the transaction hash or output
