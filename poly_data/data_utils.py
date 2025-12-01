@@ -1,11 +1,14 @@
 import poly_data.global_state as global_state
 from poly_data.utils import get_sheet_df
 import time
-import poly_data.global_state as global_state
 
 #sth here seems to be removing the position
 def update_positions(avgOnly=False):
+    """Refresh cached positions from the client, optionally skipping size updates."""
     pos_df = global_state.client.get_all_positions()
+
+    if pos_df is None or len(pos_df) == 0:
+        return
 
     with global_state.lock:
         for idx, row in pos_df.iterrows():
@@ -91,33 +94,38 @@ def set_position(token, side, size, price, source='websocket'):
     print(f"Updated position from {source}, set to ", global_state.positions[token])
 
 def update_orders():
+    """Refresh open orders and normalize to a stable dict structure."""
     all_orders = global_state.client.get_all_orders()
+
+    if all_orders is None or len(all_orders) == 0:
+        with global_state.lock:
+            global_state.orders = {}
+        return
 
     orders = {}
 
-    if len(all_orders) > 0:
-            for token in all_orders['asset_id'].unique():
+    for token in all_orders['asset_id'].unique():
 
-                if token not in orders:
+        if token not in orders:
+            orders[str(token)] = {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+
+        curr_orders = all_orders[all_orders['asset_id'] == str(token)]
+
+        if len(curr_orders) > 0:
+            sel_orders = {}
+            sel_orders['buy'] = curr_orders[curr_orders['side'] == 'BUY']
+            sel_orders['sell'] = curr_orders[curr_orders['side'] == 'SELL']
+
+            for type in ['buy', 'sell']:
+                curr = sel_orders[type]
+
+                if len(curr) > 1:
+                    print("Multiple orders found, cancelling")
+                    global_state.client.cancel_all_asset(token)
                     orders[str(token)] = {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
-
-                curr_orders = all_orders[all_orders['asset_id'] == str(token)]
-
-                if len(curr_orders) > 0:
-                    sel_orders = {}
-                    sel_orders['buy'] = curr_orders[curr_orders['side'] == 'BUY']
-                    sel_orders['sell'] = curr_orders[curr_orders['side'] == 'SELL']
-
-                    for type in ['buy', 'sell']:
-                        curr = sel_orders[type]
-
-                        if len(curr) > 1:
-                            print("Multiple orders found, cancelling")
-                            global_state.client.cancel_all_asset(token)
-                            orders[str(token)] = {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
-                        elif len(curr) == 1:
-                            orders[str(token)][type]['price'] = float(curr.iloc[0]['price'])
-                            orders[str(token)][type]['size'] = float(curr.iloc[0]['original_size'] - curr.iloc[0]['size_matched'])
+                elif len(curr) == 1:
+                    orders[str(token)][type]['price'] = float(curr.iloc[0]['price'])
+                    orders[str(token)][type]['size'] = float(curr.iloc[0]['original_size'] - curr.iloc[0]['size_matched'])
 
     with global_state.lock:
         global_state.orders = orders
@@ -150,7 +158,11 @@ def set_order(token, side, size, price):
     
 
 def update_markets():
+    """Load market metadata from Sheets and maintain token reverse lookups."""
     received_df, received_params = get_sheet_df()
+
+    if received_df is None:
+        received_df = []
 
     with global_state.lock:
         if len(received_df) > 0:
